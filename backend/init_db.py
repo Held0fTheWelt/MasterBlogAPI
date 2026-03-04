@@ -13,10 +13,10 @@ Run from project root: python init_db.py
 import os
 import sqlite3
 
-# Database path: project_root/data/masterblog.db
+# Database path: project_root/data/masterblog.db (same as backend default)
 script_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(script_dir, "data")
-db_path = os.path.join(data_dir, "masterblog.db")
+data_dir = os.path.join(script_dir, "..", "data")
+db_path = os.path.abspath(os.path.join(data_dir, "masterblog.db"))
 
 # Schema as expected by the backend Post model
 CREATE_TABLE = """
@@ -37,8 +37,30 @@ TEST_POSTS = [
 ]
 
 
+def ensure_db_exists():
+    """
+    Create the database and seed test data only if the database file does not exist.
+    Called by the backend on startup. Safe to call repeatedly.
+    """
+    if os.path.exists(db_path):
+        return
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(CREATE_TABLE)
+        for row in TEST_POSTS:
+            conn.execute(
+                "INSERT INTO posts (title, content, author, date, category_ids, tag_ids) VALUES (?, ?, ?, ?, ?, ?)",
+                row,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def main():
-    os.makedirs(data_dir, exist_ok=True)
+    """Standalone: (re)create data dir and table, reset posts, insert test data."""
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(CREATE_TABLE)
