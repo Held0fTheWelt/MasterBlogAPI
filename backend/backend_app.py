@@ -10,13 +10,34 @@ POSTS = [
 ]
 
 
+def _apply_pagination(items, default_limit=None, max_limit=100):
+    """Wendet optionale Pagination an. Gibt (slice_list, total, page, limit) zurück."""
+    page_arg = request.args.get('page', type=int)
+    limit_arg = request.args.get('limit', type=int)
+
+    if limit_arg is None and page_arg is None:
+        return items, len(items), None, None
+
+    limit = limit_arg if limit_arg is not None else (default_limit or 10)
+    page = page_arg if page_arg is not None else 1
+
+    if limit < 1:
+        return None, None, None, "limit must be at least 1"
+    if limit > max_limit:
+        return None, None, None, f"limit must be at most {max_limit}"
+    if page < 1:
+        return None, None, None, "page must be at least 1"
+
+    total = len(items)
+    start = (page - 1) * limit
+    end = start + limit
+    return items[start:end], total, page, limit
+
+
 @app.route('/api/posts', methods=['GET'])
 def get_posts():
     sort = request.args.get('sort', '').strip().lower()
     direction = request.args.get('direction', '').strip().lower()
-
-    if not sort and not direction:
-        return jsonify(POSTS)
 
     if sort and sort not in ('title', 'content'):
         return jsonify({"error": "Invalid sort field. Must be 'title' or 'content'."}), 400
@@ -25,11 +46,22 @@ def get_posts():
     if direction and not sort:
         return jsonify({"error": "Parameter 'sort' is required when 'direction' is provided."}), 400
 
-    if not sort:
-        return jsonify(POSTS)
+    if sort:
+        posts = sorted(POSTS, key=lambda p: p[sort].lower(), reverse=(direction == 'desc'))
+    else:
+        posts = POSTS
 
-    sorted_posts = sorted(POSTS, key=lambda p: p[sort].lower(), reverse=(direction == 'desc'))
-    return jsonify(sorted_posts)
+    sliced, total, page, limit = _apply_pagination(posts)
+    if sliced is None:
+        return jsonify({"error": limit}), 400  # limit ist hier die Fehlermeldung
+
+    if page is not None:
+        resp = jsonify(sliced)
+        resp.headers['X-Total-Count'] = str(total)
+        resp.headers['X-Page'] = str(page)
+        resp.headers['X-Per-Page'] = str(limit)
+        return resp
+    return jsonify(sliced)
 
 
 @app.route('/api/posts/search', methods=['GET'])
@@ -37,19 +69,26 @@ def search_posts():
     title_q = request.args.get('title', '').lower()
     content_q = request.args.get('content', '').lower()
 
-    # Wenn keine Suchbegriffe übergeben wurden, alle Posts zurückgeben
     if not title_q and not content_q:
-        return jsonify(POSTS)
+        results = list(POSTS)
+    else:
+        results = []
+        for post in POSTS:
+            title_match = title_q in post['title'].lower() if title_q else False
+            content_match = content_q in post['content'].lower() if content_q else False
+            if title_match or content_match:
+                results.append(post)
 
-    results = []
-    for post in POSTS:
-        title_match = title_q in post['title'].lower() if title_q else False
-        content_match = content_q in post['content'].lower() if content_q else False
-
-        if title_match or content_match:
-            results.append(post)
-
-    return jsonify(results)
+    sliced, total, page, limit = _apply_pagination(results)
+    if sliced is None:
+        return jsonify({"error": limit}), 400
+    if page is not None:
+        resp = jsonify(sliced)
+        resp.headers['X-Total-Count'] = str(total)
+        resp.headers['X-Page'] = str(page)
+        resp.headers['X-Per-Page'] = str(limit)
+        return resp
+    return jsonify(sliced)
 
 
 @app.route('/api/posts', methods=['POST'])
