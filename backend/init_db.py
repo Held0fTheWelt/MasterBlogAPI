@@ -7,7 +7,7 @@ Standalone – uses only the standard library (sqlite3, os).
 - Creates the posts table (schema as expected by the backend).
 - Deletes existing post rows and inserts the default test posts.
 
-Run from project root: python init_db.py
+Run from project root: python backend/init_db.py  or  python -m backend.init_db
 """
 
 import os
