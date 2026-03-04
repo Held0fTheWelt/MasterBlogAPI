@@ -17,7 +17,8 @@ from flask_swagger_ui import get_swaggerui_blueprint
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
-CORS(app)
+# So the browser sends the Authorization header when frontend runs on a different origin (e.g. different port)
+CORS(app, allow_headers=["Content-Type", "Authorization"], expose_headers=["Content-Type"])
 
 # SQLAlchemy: SQLite database (default: data/masterblog.db in project root)
 _basedir = os.path.dirname(os.path.abspath(__file__))
