@@ -15,6 +15,26 @@ def get_posts():
     return jsonify(POSTS)
 
 
+@app.route('/api/posts/search', methods=['GET'])
+def search_posts():
+    title_q = request.args.get('title', '').lower()
+    content_q = request.args.get('content', '').lower()
+
+    # Wenn keine Suchbegriffe übergeben wurden, alle Posts zurückgeben
+    if not title_q and not content_q:
+        return jsonify(POSTS)
+
+    results = []
+    for post in POSTS:
+        title_match = title_q in post['title'].lower() if title_q else False
+        content_match = content_q in post['content'].lower() if content_q else False
+
+        if title_match or content_match:
+            results.append(post)
+
+    return jsonify(results)
+
+
 @app.route('/api/posts', methods=['POST'])
 def add_post():
     data = request.get_json(silent=True)
