@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import date, datetime
 from flask import Blueprint, Flask, jsonify, redirect, request
 from flask_cors import CORS
 from flask_jwt_extended import (
@@ -51,9 +51,41 @@ limiter = Limiter(
 # API Versioning: v1 Blueprint (später z. B. /api/v2 für Breaking Changes)
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
+def _parse_date(s):
+    """Parse YYYY-MM-DD string to date; return None if invalid."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return datetime.strptime(s.strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _date_sort_key(post):
+    """Sort key for date field: use parsed date for correct ordering."""
+    d = _parse_date(post.get("date") or "")
+    return d if d is not None else date.min
+
+
 POSTS = [
-    {"id": 1, "title": "First post", "content": "This is the first post.", "category_ids": [1], "tag_ids": [1, 2]},
-    {"id": 2, "title": "Second post", "content": "This is the second post.", "category_ids": [2], "tag_ids": [2]},
+    {
+        "id": 1,
+        "title": "First post",
+        "content": "This is the first post.",
+        "author": "Admin",
+        "date": "2023-06-07",
+        "category_ids": [1],
+        "tag_ids": [1, 2],
+    },
+    {
+        "id": 2,
+        "title": "Second post",
+        "content": "This is the second post.",
+        "author": "Admin",
+        "date": "2023-06-08",
+        "category_ids": [2],
+        "tag_ids": [2],
+    },
 ]
 
 CATEGORIES = [
@@ -190,15 +222,18 @@ def get_posts():
     sort = request.args.get('sort', '').strip().lower()
     direction = request.args.get('direction', '').strip().lower()
 
-    if sort and sort not in ('title', 'content'):
-        return jsonify({"error": "Invalid sort field. Must be 'title' or 'content'."}), 400
+    if sort and sort not in ('title', 'content', 'author', 'date'):
+        return jsonify({"error": "Invalid sort field. Must be 'title', 'content', 'author' or 'date'."}), 400
     if direction and direction not in ('asc', 'desc'):
         return jsonify({"error": "Invalid direction. Must be 'asc' or 'desc'."}), 400
     if direction and not sort:
         return jsonify({"error": "Parameter 'sort' is required when 'direction' is provided."}), 400
 
     if sort:
-        posts = sorted(POSTS, key=lambda p: p[sort].lower(), reverse=(direction == 'desc'))
+        if sort == 'date':
+            posts = sorted(POSTS, key=_date_sort_key, reverse=(direction == 'desc'))
+        else:
+            posts = sorted(POSTS, key=lambda p: (p.get(sort) or "").lower(), reverse=(direction == 'desc'))
     else:
         posts = list(POSTS)
 
@@ -227,15 +262,20 @@ def get_posts():
 def search_posts():
     title_q = request.args.get('title', '').lower()
     content_q = request.args.get('content', '').lower()
+    author_q = request.args.get('author', '').lower()
+    date_q = request.args.get('date', '').strip()
 
-    if not title_q and not content_q:
+    if not title_q and not content_q and not author_q and not date_q:
         results = list(POSTS)
     else:
         results = []
         for post in POSTS:
-            title_match = title_q in post['title'].lower() if title_q else False
-            content_match = content_q in post['content'].lower() if content_q else False
-            if title_match or content_match:
+            title_match = title_q in (post.get('title') or '').lower() if title_q else False
+            content_match = content_q in (post.get('content') or '').lower() if content_q else False
+            author_match = author_q in (post.get('author') or '').lower() if author_q else False
+            date_str = (post.get('date') or '')[:10]
+            date_match = date_q in date_str if date_q else False
+            if title_match or content_match or author_match or date_match:
                 results.append(post)
 
     category_id = request.args.get('category_id', type=int)
@@ -284,6 +324,16 @@ def add_post():
     if missing:
         return jsonify({"error": f"Missing required field(s): {', '.join(missing)}"}), 400
 
+    author = (data.get("author") or "").strip() if data.get("author") is not None else ""
+    date_str = (data.get("date") or "").strip()
+    if date_str:
+        parsed = _parse_date(date_str)
+        if parsed is None:
+            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+        date_str = parsed.strftime("%Y-%m-%d")
+    else:
+        date_str = date.today().strftime("%Y-%m-%d")
+
     category_ids = data.get("category_ids") or []
     tag_ids = data.get("tag_ids") or []
     if not isinstance(category_ids, list) or not all(isinstance(x, int) for x in category_ids):
@@ -302,6 +352,8 @@ def add_post():
         "id": new_id,
         "title": data["title"],
         "content": data["content"],
+        "author": author,
+        "date": date_str,
         "category_ids": category_ids,
         "tag_ids": tag_ids,
     }
@@ -333,6 +385,17 @@ def update_post(post_id):
                 post["title"] = data["title"]
             if "content" in data:
                 post["content"] = data["content"]
+            if "author" in data:
+                post["author"] = (data["author"] or "").strip() if data["author"] is not None else ""
+            if "date" in data:
+                date_str = (data.get("date") or "").strip()
+                if date_str:
+                    parsed = _parse_date(date_str)
+                    if parsed is None:
+                        return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+                    post["date"] = parsed.strftime("%Y-%m-%d")
+                else:
+                    post["date"] = date.today().strftime("%Y-%m-%d")
             if "category_ids" in data:
                 ids = data["category_ids"]
                 if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):

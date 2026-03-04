@@ -84,10 +84,10 @@
     "/posts": {
       "get": {
         "tags": ["Posts"],
-        "summary": "Returns all posts (optional sort, pagination, filter by category/tag)",
+        "summary": "Returns all posts (optional sort by title/content/author/date, pagination, filter by category/tag)",
         "produces": ["application/json"],
         "parameters": [
-          { "in": "query", "name": "sort", "type": "string", "enum": ["title", "content"] },
+          { "in": "query", "name": "sort", "type": "string", "enum": ["title", "content", "author", "date"] },
           { "in": "query", "name": "direction", "type": "string", "enum": ["asc", "desc"] },
           { "in": "query", "name": "page", "type": "integer" },
           { "in": "query", "name": "limit", "type": "integer" },
@@ -116,6 +116,8 @@
               "properties": {
                 "title": { "type": "string" },
                 "content": { "type": "string" },
+                "author": { "type": "string", "description": "Author name (optional)" },
+                "date": { "type": "string", "format": "date", "description": "YYYY-MM-DD (optional, defaults to today)" },
                 "category_ids": { "type": "array", "items": { "type": "integer" } },
                 "tag_ids": { "type": "array", "items": { "type": "integer" } }
               }
@@ -132,11 +134,13 @@
     "/posts/search": {
       "get": {
         "tags": ["Posts"],
-        "summary": "Search posts by title or content",
+        "summary": "Search posts by title, content, author or date",
         "produces": ["application/json"],
         "parameters": [
           { "in": "query", "name": "title", "type": "string" },
           { "in": "query", "name": "content", "type": "string" },
+          { "in": "query", "name": "author", "type": "string" },
+          { "in": "query", "name": "date", "type": "string", "description": "YYYY-MM-DD or substring" },
           { "in": "query", "name": "category_id", "type": "integer" },
           { "in": "query", "name": "tag_id", "type": "integer" },
           { "in": "query", "name": "page", "type": "integer" },
@@ -176,6 +180,8 @@
               "properties": {
                 "title": { "type": "string" },
                 "content": { "type": "string" },
+                "author": { "type": "string" },
+                "date": { "type": "string", "format": "date", "description": "YYYY-MM-DD" },
                 "category_ids": { "type": "array", "items": { "type": "integer" } },
                 "tag_ids": { "type": "array", "items": { "type": "integer" } }
               }
