@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 import sys
 from datetime import date, datetime
 from flask import Blueprint, Flask, jsonify, redirect, request
@@ -18,15 +19,33 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 # So the browser sends the Authorization header when frontend runs on a different origin (e.g. different port)
-CORS(app, allow_headers=["Content-Type", "Authorization"], expose_headers=["Content-Type"])
+CORS(app, allow_headers=["Content-Type", "Authorization"], expose_headers=["Content-Type"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], supports_credentials=False)
 
 # SQLAlchemy: SQLite database (default: data/masterblog.db in project root)
 _basedir = os.path.dirname(os.path.abspath(__file__))
-_default_db = os.path.join(_basedir, "..", "data", "masterblog.db")
+_data_dir = os.path.join(_basedir, "..", "data")
+_default_db = os.path.join(_data_dir, "masterblog.db")
 _default_uri = "sqlite:///" + os.path.abspath(_default_db).replace("\\", "/")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URI", _default_uri)
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
+
+
+def _get_jwt_secret():
+    """Use JWT_SECRET_KEY from env, or a persistent file so the same key is used across restarts/reloads."""
+    key = os.environ.get("JWT_SECRET_KEY")
+    if key:
+        return key
+    secret_file = os.path.join(_data_dir, ".jwt_secret")
+    if os.path.exists(secret_file):
+        with open(secret_file, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    os.makedirs(_data_dir, exist_ok=True)
+    key = secrets.token_hex(32)
+    with open(secret_file, "w", encoding="utf-8") as f:
+        f.write(key)
+    return key
 
 # Swagger UI – API docs at http://localhost:5002/api/docs
 SWAGGER_URL = "/api/docs"
@@ -38,8 +57,12 @@ swagger_ui_blueprint = get_swaggerui_blueprint(
 )
 app.register_blueprint(swagger_ui_blueprint, url_prefix=SWAGGER_URL)
 
-app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "change-me-in-production")
-app.config["JWT_ACCESS_TOKEN_EXPIRES"] = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", 3600))  # 1h
+# Min 32 bytes for HMAC-SHA256; use persistent file so token works across restarts and reloader
+app.config["JWT_SECRET_KEY"] = _get_jwt_secret()
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", 86400))  # 24h default
+# Read token from: Authorization: Bearer <token> (default; set explicitly for clarity)
+app.config["JWT_HEADER_NAME"] = "Authorization"
+app.config["JWT_HEADER_TYPE"] = "Bearer"
 jwt = JWTManager(app)
 
 
@@ -49,7 +72,11 @@ def unauthorized_callback(_):
 
 
 @jwt.invalid_token_loader
-def invalid_token_callback(_):
+def invalid_token_callback(err):
+    if app.debug:
+        auth = request.headers.get("Authorization") or ""
+        token_preview = auth[:20] + "..." if len(auth) > 20 else auth
+        app.logger.warning("JWT invalid/expired: %s | Auth header length=%s prefix=%r", err, len(auth), token_preview)
     return jsonify({"error": "Invalid or expired token."}), 401
 
 # Rate limiting: per IP, default 100 requests/minute (configurable)
@@ -86,6 +113,15 @@ class Post(db.Model):
             "category_ids": json.loads(self.category_ids) if self.category_ids else [],
             "tag_ids": json.loads(self.tag_ids) if self.tag_ids else [],
         }
+
+
+class User(db.Model):
+    """User for auth, persisted in the database."""
+    __tablename__ = "users"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
 
 
 def _parse_date(s):
@@ -126,16 +162,13 @@ COMMENTS = [
 ]
 _NEXT_COMMENT_ID = 2
 
-# User store (in-memory). In production: use a database and secure secrets.
-USERS = []
-_NEXT_USER_ID = 1
-
-
 def _user_by_id(uid):
-    for u in USERS:
-        if u["id"] == uid:
-            return u
-    return None
+    if uid is None:
+        return None
+    u = User.query.get(int(uid))
+    if u is None:
+        return None
+    return {"id": u.id, "username": u.username}
 
 
 def _enrich_post(post):
@@ -197,20 +230,17 @@ def register():
     if len(password) < 6:
         return jsonify({"error": "Password must be at least 6 characters"}), 400
 
-    for u in USERS:
-        if u["username"].lower() == username.lower():
-            return jsonify({"error": "Username already taken"}), 409
+    existing = User.query.filter(db.func.lower(User.username) == username.lower()).first()
+    if existing:
+        return jsonify({"error": "Username already taken"}), 409
 
-    global _NEXT_USER_ID
-    user_id = _NEXT_USER_ID
-    _NEXT_USER_ID += 1
-    user = {
-        "id": user_id,
-        "username": username,
-        "password_hash": generate_password_hash(password),
-    }
-    USERS.append(user)
-    return jsonify({"id": user_id, "username": username}), 201
+    user = User(
+        username=username,
+        password_hash=generate_password_hash(password),
+    )
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({"id": user.id, "username": user.username}), 201
 
 
 @api_v1.route('/login', methods=['POST'])
@@ -225,15 +255,26 @@ def login():
     if not username or password is None:
         return jsonify({"error": "Username and password are required"}), 400
 
-    for u in USERS:
-        if u["username"].lower() == username.lower() and check_password_hash(u["password_hash"], password):
-            access_token = create_access_token(identity=u["id"])
-            return jsonify({
-                "access_token": access_token,
-                "user": {"id": u["id"], "username": u["username"]},
-            }), 200
+    user = User.query.filter(db.func.lower(User.username) == username.lower()).first()
+    if user and check_password_hash(user.password_hash, password):
+        access_token = create_access_token(identity=str(user.id))
+        return jsonify({
+            "access_token": access_token,
+            "user": {"id": user.id, "username": user.username},
+        }), 200
 
     return jsonify({"error": "Invalid username or password"}), 401
+
+
+@api_v1.route('/me', methods=['GET'])
+@jwt_required()
+def get_current_user():
+    """Return the current user from the JWT. Use this in Postman to verify the token works."""
+    uid = get_jwt_identity()
+    user = User.query.get(int(uid))
+    if user is None:
+        return jsonify({"error": "User not found."}), 404
+    return jsonify({"id": user.id, "username": user.username}), 200
 
 
 # ---------- Posts (public: list, search) ----------
@@ -516,7 +557,7 @@ def create_comment(post_id):
     if not content:
         return jsonify({"error": "Content is required"}), 400
     global _NEXT_COMMENT_ID, COMMENTS
-    author_id = get_jwt_identity()
+    author_id = int(get_jwt_identity())
     comment = {
         "id": _NEXT_COMMENT_ID,
         "post_id": post_id,
@@ -538,30 +579,58 @@ def ratelimit_handler(e):
     return jsonify({"error": "Too many requests. Please try again later."}), 429
 
 
-# Backward compatibility: /api/register, /api/login → /api/v1/...
+# Backward compatibility: /api/... maps to /api/v1/... without redirects.
+# Browsers may drop Authorization headers on redirected DELETE/PUT requests; aliases avoid that class of issues.
 @app.route("/api/register", methods=["POST"])
+def legacy_register():
+    return register()
+
+
 @app.route("/api/login", methods=["POST"])
-def redirect_api_auth_to_v1():
-    path = request.path.replace("/api/", "/api/v1/", 1)
-    return redirect(path, code=307)
+def legacy_login():
+    return login()
 
 
-# Backward compatibility: /api/posts* → /api/v1/posts* (307 = preserve method and body)
 @app.route("/api/posts", methods=["GET", "POST"])
+def legacy_posts():
+    if request.method == "GET":
+        return get_posts()
+    return add_post()
+
+
 @app.route("/api/posts/search", methods=["GET"])
-def redirect_api_posts_to_v1():
-    path = request.path.replace("/api/", "/api/v1/", 1)
-    if request.query_string:
-        path = f"{path}?{request.query_string.decode()}"
-    return redirect(path, code=307)
+def legacy_search_posts():
+    return search_posts()
 
 
-@app.route("/api/posts/<int:post_id>", methods=["DELETE", "PUT"])
-def redirect_api_post_to_v1(post_id):
-    path = f"/api/v1/posts/{post_id}"
-    if request.query_string:
-        path = f"{path}?{request.query_string.decode()}"
-    return redirect(path, code=307)
+@app.route("/api/posts/<int:post_id>", methods=["GET", "DELETE", "PUT"])
+def legacy_post(post_id):
+    if request.method == "GET":
+        return get_post(post_id)
+    if request.method == "DELETE":
+        return delete_post(post_id)
+    return update_post(post_id)
+
+
+@app.route("/api/categories", methods=["GET", "POST"])
+def legacy_categories():
+    if request.method == "GET":
+        return list_categories()
+    return create_category()
+
+
+@app.route("/api/tags", methods=["GET", "POST"])
+def legacy_tags():
+    if request.method == "GET":
+        return list_tags()
+    return create_tag()
+
+
+@app.route("/api/posts/<int:post_id>/comments", methods=["GET", "POST"])
+def legacy_comments(post_id):
+    if request.method == "GET":
+        return list_comments(post_id)
+    return create_comment(post_id)
 
 
 if __name__ == '__main__':
