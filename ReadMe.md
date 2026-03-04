@@ -73,7 +73,6 @@ Dort siehst du alle Wege (Endpoints) der API und kannst sie ausprobieren. Über 
 - **backend/** – Server-Code und Einstellungen; hier liegt auch `init_db.py` zum Anlegen der Datenbank.
 - **frontend/** – Webseite (HTML, CSS, JavaScript) zum Anzeigen und Bedienen der Beiträge.
 - **data/** – Hier wird die Datenbankdatei abgelegt (wird von `init_db.py` bzw. dem Server erstellt).
-- **postman/** – Vordefinierte Anfragen für Postman zum Testen der API.
 
 ---
 
