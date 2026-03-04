@@ -14,9 +14,32 @@
             <input type="text" id="api-base-url" placeholder="Enter API Base URL" value="http://127.0.0.1:5002/api/v1">
             <button onclick="loadPosts()">Load Posts</button>
         </div>
+        <div class="login-row">
+            <input type="text" id="login-username" placeholder="Username">
+            <input type="password" id="login-password" placeholder="Password">
+            <button onclick="login()">Log in</button>
+            <span id="login-status" class="login-status"></span>
+        </div>
+        <div class="search-sort-row">
+            <input type="text" id="search-query" placeholder="Search by title or content">
+            <select id="sort-field">
+                <option value="">No sort</option>
+                <option value="title">Title</option>
+                <option value="content">Content</option>
+                <option value="author">Author</option>
+                <option value="date">Date</option>
+            </select>
+            <select id="sort-direction">
+                <option value="asc">Ascending</option>
+                <option value="desc">Descending</option>
+            </select>
+            <button onclick="loadPosts()">Search / Sort</button>
+        </div>
         <div class="input-field">
-            <input type="text" id="post-title" placeholder="Enter Post Title">
-            <input type="text" id="post-content" placeholder="Enter Post Content">
+            <input type="text" id="post-title" placeholder="Post Title">
+            <input type="text" id="post-content" placeholder="Post Content">
+            <input type="text" id="post-author" placeholder="Author (optional)">
+            <input type="text" id="post-date" placeholder="Date YYYY-MM-DD (optional)">
             <button onclick="addPost()">Add Post</button>
         </div>
         <div id="post-container">
