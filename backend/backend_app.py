@@ -1,9 +1,10 @@
+"""MasterBlog API: Flask app with JWT auth, posts, categories, tags, comments."""
 import json
 import os
 import secrets
 import sys
 from datetime import date, datetime
-from flask import Blueprint, Flask, jsonify, redirect, request
+from flask import Blueprint, Flask, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import (
     create_access_token,
@@ -18,9 +19,14 @@ from flask_swagger_ui import get_swaggerui_blueprint
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
-# So the browser sends the Authorization header when frontend runs on a different origin (e.g. different port)
-CORS(app, allow_headers=["Content-Type", "Authorization"], expose_headers=["Content-Type"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], supports_credentials=False)
+# So the browser sends the Authorization header when frontend runs on a different origin.
+CORS(
+    app,
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Content-Type"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    supports_credentials=False,
+)
 
 # SQLAlchemy: SQLite database (default: data/masterblog.db in project root)
 _basedir = os.path.dirname(os.path.abspath(__file__))
@@ -33,7 +39,7 @@ db = SQLAlchemy(app)
 
 
 def _get_jwt_secret():
-    """Use JWT_SECRET_KEY from env, or a persistent file so the same key is used across restarts/reloads."""
+    """Use JWT_SECRET_KEY from env, or a persistent file for restarts/reloads."""
     key = os.environ.get("JWT_SECRET_KEY")
     if key:
         return key
@@ -59,7 +65,9 @@ app.register_blueprint(swagger_ui_blueprint, url_prefix=SWAGGER_URL)
 
 # Min 32 bytes for HMAC-SHA256; use persistent file so token works across restarts and reloader
 app.config["JWT_SECRET_KEY"] = _get_jwt_secret()
-app.config["JWT_ACCESS_TOKEN_EXPIRES"] = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", 86400))  # 24h default
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = int(
+    os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", 86400)
+)  # 24h default
 # Read token from: Authorization: Bearer <token> (default; set explicitly for clarity)
 app.config["JWT_HEADER_NAME"] = "Authorization"
 app.config["JWT_HEADER_TYPE"] = "Bearer"
@@ -68,15 +76,22 @@ jwt = JWTManager(app)
 
 @jwt.unauthorized_loader
 def unauthorized_callback(_):
-    return jsonify({"error": "Authorization required. Missing or invalid token."}), 401
+    """Return 401 JSON when Authorization header is missing or invalid."""
+    return jsonify(
+        {"error": "Authorization required. Missing or invalid token."}
+    ), 401
 
 
 @jwt.invalid_token_loader
 def invalid_token_callback(err):
+    """Return 401 JSON when JWT is invalid or expired; log details in debug."""
     if app.debug:
         auth = request.headers.get("Authorization") or ""
         token_preview = auth[:20] + "..." if len(auth) > 20 else auth
-        app.logger.warning("JWT invalid/expired: %s | Auth header length=%s prefix=%r", err, len(auth), token_preview)
+        app.logger.warning(
+            "JWT invalid/expired: %s | Auth header length=%s prefix=%r",
+            err, len(auth), token_preview,
+        )
     return jsonify({"error": "Invalid or expired token."}), 401
 
 # Rate limiting: per IP, default 100 requests/minute (configurable)
@@ -104,6 +119,7 @@ class Post(db.Model):
     tag_ids = db.Column(db.Text, default="[]")       # JSON list
 
     def to_dict(self):
+        """Return post as a JSON-serializable dict."""
         return {
             "id": self.id,
             "title": self.title,
@@ -114,14 +130,27 @@ class Post(db.Model):
             "tag_ids": json.loads(self.tag_ids) if self.tag_ids else [],
         }
 
+    def __repr__(self):
+        """Return string representation for debugging."""
+        return f"<Post id={self.id} title={self.title!r}>"
+
 
 class User(db.Model):
     """User for auth, persisted in the database."""
+
     __tablename__ = "users"
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
+
+    def to_dict(self):
+        """Return user as a JSON-serializable dict (id, username only)."""
+        return {"id": self.id, "username": self.username}
+
+    def __repr__(self):
+        """Return string representation for debugging."""
+        return f"<User id={self.id} username={self.username!r}>"
 
 
 def _parse_date(s):
@@ -149,20 +178,28 @@ CATEGORIES = [
     {"id": 1, "name": "Tech"},
     {"id": 2, "name": "Life"},
 ]
-_NEXT_CATEGORY_ID = 3
 
 TAGS = [
     {"id": 1, "name": "python"},
     {"id": 2, "name": "flask"},
 ]
-_NEXT_TAG_ID = 3
 
 COMMENTS = [
-    {"id": 1, "post_id": 1, "author_id": None, "content": "First comment.", "created_at": "2024-01-01T12:00:00"},
+    {
+        "id": 1,
+        "post_id": 1,
+        "author_id": None,
+        "content": "First comment.",
+        "created_at": "2024-01-01T12:00:00",
+    },
 ]
-_NEXT_COMMENT_ID = 2
+_next_comment_id = [2]
+_next_category_id = [3]
+_next_tag_id = [3]
+
 
 def _user_by_id(uid):
+    """Return a dict with id and username for the given user id, or None."""
     if uid is None:
         return None
     u = User.query.get(int(uid))
@@ -180,6 +217,7 @@ def _enrich_post(post):
 
 
 def _enrich_comment(comment):
+    """Add author_name to comment dict for response."""
     out = dict(comment)
     u = _user_by_id(comment.get("author_id"))
     out["author_name"] = u["username"] if u else "(anonymous)"
@@ -187,7 +225,7 @@ def _enrich_comment(comment):
 
 
 def _apply_pagination(items, default_limit=None, max_limit=100):
-    """Apply optional pagination. Returns (sliced_list, total, page, limit)."""
+    """Apply optional pagination. Returns (sliced, total, page, limit) or (None,..,err)."""
     page_arg = request.args.get('page', type=int)
     limit_arg = request.args.get('limit', type=int)
 
@@ -214,6 +252,7 @@ def _apply_pagination(items, default_limit=None, max_limit=100):
 
 @api_v1.route('/register', methods=['POST'])
 def register():
+    """Register a new user; return 201 with id and username or error."""
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
@@ -221,16 +260,22 @@ def register():
     username = (data.get("username") or "").strip()
     password = data.get("password")
 
+    err = None
+    status = 201
     if not username:
-        return jsonify({"error": "Username is required"}), 400
-    if not password:
-        return jsonify({"error": "Password is required"}), 400
-    if len(username) < 2:
-        return jsonify({"error": "Username must be at least 2 characters"}), 400
-    if len(password) < 6:
-        return jsonify({"error": "Password must be at least 6 characters"}), 400
+        err, status = {"error": "Username is required"}, 400
+    elif not password:
+        err, status = {"error": "Password is required"}, 400
+    elif len(username) < 2:
+        err, status = {"error": "Username must be at least 2 characters"}, 400
+    elif len(password) < 6:
+        err, status = {"error": "Password must be at least 6 characters"}, 400
+    if err:
+        return jsonify(err), status
 
-    existing = User.query.filter(db.func.lower(User.username) == username.lower()).first()
+    existing = User.query.filter(
+        db.func.lower(User.username) == username.lower()
+    ).first()
     if existing:
         return jsonify({"error": "Username already taken"}), 409
 
@@ -245,6 +290,7 @@ def register():
 
 @api_v1.route('/login', methods=['POST'])
 def login():
+    """Authenticate user and return JWT access_token and user info."""
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
@@ -269,7 +315,7 @@ def login():
 @api_v1.route('/me', methods=['GET'])
 @jwt_required()
 def get_current_user():
-    """Return the current user from the JWT. Use this in Postman to verify the token works."""
+    """Return the current user from the JWT (for Postman token verification)."""
     uid = get_jwt_identity()
     user = User.query.get(int(uid))
     if user is None:
@@ -279,36 +325,49 @@ def get_current_user():
 
 # ---------- Posts (public: list, search) ----------
 
-@api_v1.route('/posts', methods=['GET'])
-def get_posts():
-    sort = request.args.get('sort', '').strip().lower()
-    direction = request.args.get('direction', '').strip().lower()
-
-    if sort and sort not in ('title', 'content', 'author', 'date'):
-        return jsonify({"error": "Invalid sort field. Must be 'title', 'content', 'author' or 'date'."}), 400
-    if direction and direction not in ('asc', 'desc'):
-        return jsonify({"error": "Invalid direction. Must be 'asc' or 'desc'."}), 400
-    if direction and not sort:
-        return jsonify({"error": "Parameter 'sort' is required when 'direction' is provided."}), 400
-
-    posts = _get_all_posts_as_dicts()
-    if sort:
-        if sort == 'date':
-            posts = sorted(posts, key=_date_sort_key, reverse=(direction == 'desc'))
-        else:
-            posts = sorted(posts, key=lambda p: (p.get(sort) or "").lower(), reverse=(direction == 'desc'))
-
-    # Optional: filter by category or tag
-    category_id = request.args.get('category_id', type=int)
-    tag_id = request.args.get('tag_id', type=int)
+def _filter_sort_posts(posts, sort, direction, category_id, tag_id):
+    """Filter posts by category/tag and sort; return list of post dicts."""
     if category_id is not None:
         posts = [p for p in posts if category_id in p.get("category_ids", [])]
     if tag_id is not None:
         posts = [p for p in posts if tag_id in p.get("tag_ids", [])]
+    if sort:
+        rev = direction == 'desc'
+        if sort == 'date':
+            posts = sorted(posts, key=_date_sort_key, reverse=rev)
+        else:
+            posts = sorted(
+                posts,
+                key=lambda p: (p.get(sort) or "").lower(),
+                reverse=rev,
+            )
+    return posts
+
+
+@api_v1.route('/posts', methods=['GET'])
+def get_posts():
+    """List posts with optional sort, direction, category_id, tag_id, pagination."""
+    sort = request.args.get('sort', '').strip().lower()
+    direction = request.args.get('direction', '').strip().lower()
+
+    if sort and sort not in ('title', 'content', 'author', 'date'):
+        msg = "Invalid sort field. Must be 'title', 'content', 'author' or 'date'."
+        return jsonify({"error": msg}), 400
+    if direction and direction not in ('asc', 'desc'):
+        return jsonify({"error": "Invalid direction. Must be 'asc' or 'desc'."}), 400
+    if direction and not sort:
+        return jsonify(
+            {"error": "Parameter 'sort' is required when 'direction' is provided."}
+        ), 400
+
+    posts = _get_all_posts_as_dicts()
+    category_id = request.args.get('category_id', type=int)
+    tag_id = request.args.get('tag_id', type=int)
+    posts = _filter_sort_posts(posts, sort, direction, category_id, tag_id)
 
     sliced, total, page, limit = _apply_pagination(posts)
     if sliced is None:
-        return jsonify({"error": limit}), 400  # limit holds the error message here
+        return jsonify({"error": limit}), 400
 
     if page is not None:
         resp = jsonify([_enrich_post(p) for p in sliced])
@@ -319,26 +378,35 @@ def get_posts():
     return jsonify([_enrich_post(p) for p in sliced])
 
 
+def _post_matches_search(post, title_q, content_q, author_q, date_q):
+    """Return True if post matches any of the search queries."""
+    if title_q and title_q in (post.get('title') or '').lower():
+        return True
+    if content_q and content_q in (post.get('content') or '').lower():
+        return True
+    if author_q and author_q in (post.get('author') or '').lower():
+        return True
+    if date_q and date_q in (post.get('date') or '')[:10]:
+        return True
+    return False
+
+
 @api_v1.route('/posts/search', methods=['GET'])
 def search_posts():
+    """Search posts by title, content, author, date; optional filters and pagination."""
     title_q = request.args.get('title', '').lower()
     content_q = request.args.get('content', '').lower()
     author_q = request.args.get('author', '').lower()
     date_q = request.args.get('date', '').strip()
 
     posts = _get_all_posts_as_dicts()
-    if not title_q and not content_q and not author_q and not date_q:
-        results = posts
+    if title_q or content_q or author_q or date_q:
+        results = [
+            p for p in posts
+            if _post_matches_search(p, title_q, content_q, author_q, date_q)
+        ]
     else:
-        results = []
-        for post in posts:
-            title_match = title_q in (post.get('title') or '').lower() if title_q else False
-            content_match = content_q in (post.get('content') or '').lower() if content_q else False
-            author_match = author_q in (post.get('author') or '').lower() if author_q else False
-            date_str = (post.get('date') or '')[:10]
-            date_match = date_q in date_str if date_q else False
-            if title_match or content_match or author_match or date_match:
-                results.append(post)
+        results = posts
 
     category_id = request.args.get('category_id', type=int)
     tag_id = request.args.get('tag_id', type=int)
@@ -361,6 +429,7 @@ def search_posts():
 
 @api_v1.route('/posts/<int:post_id>', methods=['GET'])
 def get_post(post_id):
+    """Return a single post by id with comments, or 404."""
     post = Post.query.get(post_id)
     if post is None:
         return jsonify({"error": "Post not found"}), 404
@@ -370,31 +439,35 @@ def get_post(post_id):
     return jsonify(out), 200
 
 
+def _validate_post_body(data):
+    """Validate POST body for add_post; return (error_dict, status) or (None, None)."""
+    if data is None:
+        return {"error": "Invalid or missing JSON body"}, 400
+    missing = [f for f in ("title", "content") if not data.get(f)]
+    if missing:
+        return {"error": f"Missing required field(s): {', '.join(missing)}"}, 400
+    date_str = (data.get("date") or "").strip()
+    if date_str and _parse_date(date_str) is None:
+        return {"error": "date must be in YYYY-MM-DD format"}, 400
+    return None, None
+
+
 @api_v1.route('/posts', methods=['POST'])
 @jwt_required()
 def add_post():
+    """Create a new post; requires JWT."""
     data = request.get_json(silent=True)
-    if data is None:
-        return jsonify({"error": "Invalid or missing JSON body"}), 400
-
-    missing = []
-    if not data.get("title"):
-        missing.append("title")
-    if not data.get("content"):
-        missing.append("content")
-
-    if missing:
-        return jsonify({"error": f"Missing required field(s): {', '.join(missing)}"}), 400
+    err, status = _validate_post_body(data)
+    if err:
+        return jsonify(err), status
 
     author = (data.get("author") or "").strip() if data.get("author") is not None else ""
     date_str = (data.get("date") or "").strip()
-    if date_str:
-        parsed = _parse_date(date_str)
-        if parsed is None:
-            return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
-        date_str = parsed.strftime("%Y-%m-%d")
-    else:
-        date_str = date.today().strftime("%Y-%m-%d")
+    date_str = (
+        _parse_date(date_str).strftime("%Y-%m-%d")
+        if date_str
+        else date.today().strftime("%Y-%m-%d")
+    )
 
     category_ids = data.get("category_ids") or []
     tag_ids = data.get("tag_ids") or []
@@ -402,11 +475,9 @@ def add_post():
         return jsonify({"error": "category_ids must be a list of integers"}), 400
     if not isinstance(tag_ids, list) or not all(isinstance(x, int) for x in tag_ids):
         return jsonify({"error": "tag_ids must be a list of integers"}), 400
-    cat_ok = all(any(c["id"] == x for c in CATEGORIES) for x in category_ids)
-    tag_ok = all(any(t["id"] == x for t in TAGS) for x in tag_ids)
-    if not cat_ok:
+    if not all(any(c["id"] == x for c in CATEGORIES) for x in category_ids):
         return jsonify({"error": "One or more category_ids are invalid"}), 400
-    if not tag_ok:
+    if not all(any(t["id"] == x for t in TAGS) for x in tag_ids):
         return jsonify({"error": "One or more tag_ids are invalid"}), 400
 
     new_post = Post(
@@ -425,53 +496,80 @@ def add_post():
 @api_v1.route('/posts/<int:post_id>', methods=['DELETE'])
 @jwt_required()
 def delete_post(post_id):
+    """Delete a post by id; also remove its comments from in-memory store."""
     post = Post.query.get(post_id)
     if post is None:
         return jsonify({"error": "Post not found"}), 404
     db.session.delete(post)
     db.session.commit()
-    global COMMENTS
-    COMMENTS = [c for c in COMMENTS if c["post_id"] != post_id]
-    return jsonify({"message": f"Post with id {post_id} has been deleted successfully."}), 200
+    COMMENTS[:] = [c for c in COMMENTS if c["post_id"] != post_id]
+    return jsonify(
+        {"message": f"Post with id {post_id} has been deleted successfully."}
+    ), 200
 
 
-@api_v1.route('/posts/<int:post_id>', methods=['PUT'])
-@jwt_required()
-def update_post(post_id):
-    data = request.get_json(silent=True) or {}
-    post = Post.query.get(post_id)
-    if post is None:
-        return jsonify({"error": "Post not found"}), 404
+def _validate_category_tag_ids(category_ids, tag_ids):
+    """Validate category_ids and tag_ids; return (error_dict, status) or (None, None)."""
+    if category_ids is not None:
+        if not isinstance(category_ids, list) or not all(
+            isinstance(x, int) for x in category_ids
+        ):
+            return {"error": "category_ids must be a list of integers"}, 400
+        if not all(any(c["id"] == x for c in CATEGORIES) for x in category_ids):
+            return {"error": "One or more category_ids are invalid"}, 400
+    if tag_ids is not None:
+        if not isinstance(tag_ids, list) or not all(
+            isinstance(x, int) for x in tag_ids
+        ):
+            return {"error": "tag_ids must be a list of integers"}, 400
+        if not all(any(t["id"] == x for t in TAGS) for x in tag_ids):
+            return {"error": "One or more tag_ids are invalid"}, 400
+    return None, None
 
+
+def _apply_post_update(post, data):
+    """Apply update fields from data to post; return (error_dict, status) or (None, None)."""
     if "title" in data:
         post.title = data["title"]
     if "content" in data:
         post.content = data["content"]
     if "author" in data:
-        post.author = (data["author"] or "").strip() if data["author"] is not None else ""
+        post.author = (
+            (data["author"] or "").strip() if data["author"] is not None else ""
+        )
     if "date" in data:
         date_str = (data.get("date") or "").strip()
         if date_str:
             parsed = _parse_date(date_str)
             if parsed is None:
-                return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+                return {"error": "date must be in YYYY-MM-DD format"}, 400
             post.date = parsed.strftime("%Y-%m-%d")
         else:
             post.date = date.today().strftime("%Y-%m-%d")
     if "category_ids" in data:
-        ids = data["category_ids"]
-        if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):
-            return jsonify({"error": "category_ids must be a list of integers"}), 400
-        if not all(any(c["id"] == x for c in CATEGORIES) for x in ids):
-            return jsonify({"error": "One or more category_ids are invalid"}), 400
-        post.category_ids = json.dumps(ids)
+        err, status = _validate_category_tag_ids(data["category_ids"], None)
+        if err:
+            return err, status
+        post.category_ids = json.dumps(data["category_ids"])
     if "tag_ids" in data:
-        ids = data["tag_ids"]
-        if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):
-            return jsonify({"error": "tag_ids must be a list of integers"}), 400
-        if not all(any(t["id"] == x for t in TAGS) for x in ids):
-            return jsonify({"error": "One or more tag_ids are invalid"}), 400
-        post.tag_ids = json.dumps(ids)
+        err, status = _validate_category_tag_ids(None, data["tag_ids"])
+        if err:
+            return err, status
+        post.tag_ids = json.dumps(data["tag_ids"])
+    return None, None
+
+
+@api_v1.route('/posts/<int:post_id>', methods=['PUT'])
+@jwt_required()
+def update_post(post_id):
+    """Update a post by id; requires JWT."""
+    data = request.get_json(silent=True) or {}
+    post = Post.query.get(post_id)
+    if post is None:
+        return jsonify({"error": "Post not found"}), 404
+    err, status = _apply_post_update(post, data)
+    if err:
+        return jsonify(err), status
     db.session.commit()
     return jsonify(_enrich_post(post.to_dict())), 200
 
@@ -480,12 +578,14 @@ def update_post(post_id):
 
 @api_v1.route('/categories', methods=['GET'])
 def list_categories():
+    """Return all categories."""
     return jsonify(CATEGORIES), 200
 
 
 @api_v1.route('/categories', methods=['POST'])
 @jwt_required()
 def create_category():
+    """Create a category; requires JWT."""
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
@@ -494,9 +594,9 @@ def create_category():
         return jsonify({"error": "Name is required"}), 400
     if any(c["name"].lower() == name.lower() for c in CATEGORIES):
         return jsonify({"error": "Category with this name already exists"}), 409
-    global _NEXT_CATEGORY_ID
-    cat = {"id": _NEXT_CATEGORY_ID, "name": name}
-    _NEXT_CATEGORY_ID += 1
+    next_id = _next_category_id[0]
+    _next_category_id[0] += 1
+    cat = {"id": next_id, "name": name}
     CATEGORIES.append(cat)
     return jsonify(cat), 201
 
@@ -505,12 +605,14 @@ def create_category():
 
 @api_v1.route('/tags', methods=['GET'])
 def list_tags():
+    """Return all tags."""
     return jsonify(TAGS), 200
 
 
 @api_v1.route('/tags', methods=['POST'])
 @jwt_required()
 def create_tag():
+    """Create a tag; requires JWT."""
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "Invalid or missing JSON body"}), 400
@@ -519,9 +621,9 @@ def create_tag():
         return jsonify({"error": "Name is required"}), 400
     if any(t["name"].lower() == name.lower() for t in TAGS):
         return jsonify({"error": "Tag with this name already exists"}), 409
-    global _NEXT_TAG_ID
-    tag = {"id": _NEXT_TAG_ID, "name": name}
-    _NEXT_TAG_ID += 1
+    next_id = _next_tag_id[0]
+    _next_tag_id[0] += 1
+    tag = {"id": next_id, "name": name}
     TAGS.append(tag)
     return jsonify(tag), 201
 
@@ -530,6 +632,7 @@ def create_tag():
 
 @api_v1.route('/posts/<int:post_id>/comments', methods=['GET'])
 def list_comments(post_id):
+    """List comments for a post with optional pagination."""
     if Post.query.get(post_id) is None:
         return jsonify({"error": "Post not found"}), 404
     comments = [_enrich_comment(c) for c in COMMENTS if c["post_id"] == post_id]
@@ -548,6 +651,7 @@ def list_comments(post_id):
 @api_v1.route('/posts/<int:post_id>/comments', methods=['POST'])
 @jwt_required()
 def create_comment(post_id):
+    """Create a comment on a post; requires JWT."""
     if Post.query.get(post_id) is None:
         return jsonify({"error": "Post not found"}), 404
     data = request.get_json(silent=True)
@@ -556,16 +660,16 @@ def create_comment(post_id):
     content = (data.get("content") or "").strip()
     if not content:
         return jsonify({"error": "Content is required"}), 400
-    global _NEXT_COMMENT_ID, COMMENTS
+    next_id = _next_comment_id[0]
+    _next_comment_id[0] += 1
     author_id = int(get_jwt_identity())
     comment = {
-        "id": _NEXT_COMMENT_ID,
+        "id": next_id,
         "post_id": post_id,
         "author_id": author_id,
         "content": content,
         "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
     }
-    _NEXT_COMMENT_ID += 1
     COMMENTS.append(comment)
     return jsonify(_enrich_comment(comment)), 201
 
@@ -575,24 +679,27 @@ app.register_blueprint(api_v1)
 
 # Rate limit exceeded: consistent JSON response
 @app.errorhandler(429)
-def ratelimit_handler(e):
+def ratelimit_handler(_request):
+    """Return 429 JSON when rate limit is exceeded."""
     return jsonify({"error": "Too many requests. Please try again later."}), 429
 
 
-# Backward compatibility: /api/... maps to /api/v1/... without redirects.
-# Browsers may drop Authorization headers on redirected DELETE/PUT requests; aliases avoid that class of issues.
+# Backward compatibility: /api/... maps to /api/v1/... (no redirect to keep Auth header).
 @app.route("/api/register", methods=["POST"])
 def legacy_register():
+    """Legacy route: forward to register."""
     return register()
 
 
 @app.route("/api/login", methods=["POST"])
 def legacy_login():
+    """Legacy route: forward to login."""
     return login()
 
 
 @app.route("/api/posts", methods=["GET", "POST"])
 def legacy_posts():
+    """Legacy route: forward to get_posts or add_post."""
     if request.method == "GET":
         return get_posts()
     return add_post()
@@ -600,11 +707,13 @@ def legacy_posts():
 
 @app.route("/api/posts/search", methods=["GET"])
 def legacy_search_posts():
+    """Legacy route: forward to search_posts."""
     return search_posts()
 
 
 @app.route("/api/posts/<int:post_id>", methods=["GET", "DELETE", "PUT"])
 def legacy_post(post_id):
+    """Legacy route: forward to get_post, delete_post, or update_post."""
     if request.method == "GET":
         return get_post(post_id)
     if request.method == "DELETE":
@@ -614,6 +723,7 @@ def legacy_post(post_id):
 
 @app.route("/api/categories", methods=["GET", "POST"])
 def legacy_categories():
+    """Legacy route: forward to list_categories or create_category."""
     if request.method == "GET":
         return list_categories()
     return create_category()
@@ -621,6 +731,7 @@ def legacy_categories():
 
 @app.route("/api/tags", methods=["GET", "POST"])
 def legacy_tags():
+    """Legacy route: forward to list_tags or create_tag."""
     if request.method == "GET":
         return list_tags()
     return create_tag()
@@ -628,6 +739,7 @@ def legacy_tags():
 
 @app.route("/api/posts/<int:post_id>/comments", methods=["GET", "POST"])
 def legacy_comments(post_id):
+    """Legacy route: forward to list_comments or create_comment."""
     if request.method == "GET":
         return list_comments(post_id)
     return create_comment(post_id)

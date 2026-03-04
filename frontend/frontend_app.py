@@ -1,3 +1,4 @@
+"""Frontend app: serves the MasterBlog UI (index.html and static assets)."""
 from flask import Flask, render_template
 
 app = Flask(__name__)
@@ -5,6 +6,7 @@ app = Flask(__name__)
 
 @app.route('/', methods=['GET'])
 def home():
+    """Serve the main blog UI page."""
     return render_template("index.html")
 
 
