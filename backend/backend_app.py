@@ -1,8 +1,21 @@
-from flask import Flask, jsonify, request
+from flask import Blueprint, Flask, jsonify, redirect, request
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
-CORS(app)  # This will enable CORS for all routes
+CORS(app)
+
+# Rate limiting: pro IP, Standard 100 Requests/Minute (konfigurierbar)
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["100 per minute"],
+    storage_uri="memory://",
+)
+
+# API Versioning: v1 Blueprint (später z. B. /api/v2 für Breaking Changes)
+api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
 POSTS = [
     {"id": 1, "title": "First post", "content": "This is the first post."},
@@ -34,7 +47,7 @@ def _apply_pagination(items, default_limit=None, max_limit=100):
     return items[start:end], total, page, limit
 
 
-@app.route('/api/posts', methods=['GET'])
+@api_v1.route('/posts', methods=['GET'])
 def get_posts():
     sort = request.args.get('sort', '').strip().lower()
     direction = request.args.get('direction', '').strip().lower()
@@ -64,7 +77,7 @@ def get_posts():
     return jsonify(sliced)
 
 
-@app.route('/api/posts/search', methods=['GET'])
+@api_v1.route('/posts/search', methods=['GET'])
 def search_posts():
     title_q = request.args.get('title', '').lower()
     content_q = request.args.get('content', '').lower()
@@ -91,7 +104,7 @@ def search_posts():
     return jsonify(sliced)
 
 
-@app.route('/api/posts', methods=['POST'])
+@api_v1.route('/posts', methods=['POST'])
 def add_post():
     data = request.get_json(silent=True)
     if data is None:
@@ -112,7 +125,7 @@ def add_post():
     return jsonify(new_post), 201
 
 
-@app.route('/api/posts/<int:post_id>', methods=['DELETE'])
+@api_v1.route('/posts/<int:post_id>', methods=['DELETE'])
 def delete_post(post_id):
     for i, post in enumerate(POSTS):
         if post["id"] == post_id:
@@ -121,7 +134,7 @@ def delete_post(post_id):
     return jsonify({"error": "Post not found"}), 404
 
 
-@app.route('/api/posts/<int:post_id>', methods=['PUT'])
+@api_v1.route('/posts/<int:post_id>', methods=['PUT'])
 def update_post(post_id):
     data = request.get_json(silent=True) or {}
 
@@ -135,6 +148,33 @@ def update_post(post_id):
             return jsonify(post), 200
 
     return jsonify({"error": "Post not found"}), 404
+
+
+app.register_blueprint(api_v1)
+
+
+# Rate-Limit-Überschreitung: einheitliche JSON-Antwort
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({"error": "Too many requests. Please try again later."}), 429
+
+
+# Abwärtskompatibilität: /api/posts* → /api/v1/posts* (307 = Method + Body bleiben)
+@app.route("/api/posts", methods=["GET", "POST"])
+@app.route("/api/posts/search", methods=["GET"])
+def redirect_api_posts_to_v1():
+    path = request.path.replace("/api/", "/api/v1/", 1)
+    if request.query_string:
+        path = f"{path}?{request.query_string.decode()}"
+    return redirect(path, code=307)
+
+
+@app.route("/api/posts/<int:post_id>", methods=["DELETE", "PUT"])
+def redirect_api_post_to_v1(post_id):
+    path = f"/api/v1/posts/{post_id}"
+    if request.query_string:
+        path = f"{path}?{request.query_string.decode()}"
+    return redirect(path, code=307)
 
 
 if __name__ == '__main__':
