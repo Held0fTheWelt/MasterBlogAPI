@@ -2,4 +2,5 @@ flask
 flask-cors
 Flask-Limiter
 Flask-JWT-Extended
+Flask-SQLAlchemy
 flask_swagger_ui
