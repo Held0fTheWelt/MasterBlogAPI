@@ -1,10 +1,32 @@
+import os
 from flask import Blueprint, Flask, jsonify, redirect, request
 from flask_cors import CORS
+from flask_jwt_extended import (
+    create_access_token,
+    get_jwt_identity,
+    jwt_required,
+    JWTManager,
+)
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 CORS(app)
+
+app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "change-me-in-production")
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", 3600))  # 1h
+jwt = JWTManager(app)
+
+
+@jwt.unauthorized_loader
+def unauthorized_callback(_):
+    return jsonify({"error": "Authorization required. Missing or invalid token."}), 401
+
+
+@jwt.invalid_token_loader
+def invalid_token_callback(_):
+    return jsonify({"error": "Invalid or expired token."}), 401
 
 # Rate limiting: pro IP, Standard 100 Requests/Minute (konfigurierbar)
 limiter = Limiter(
@@ -21,6 +43,10 @@ POSTS = [
     {"id": 1, "title": "First post", "content": "This is the first post."},
     {"id": 2, "title": "Second post", "content": "This is the second post."},
 ]
+
+# User-Speicher (In-Memory). In Produktion: Datenbank + sichere Secrets.
+USERS = []
+_NEXT_USER_ID = 1
 
 
 def _apply_pagination(items, default_limit=None, max_limit=100):
@@ -46,6 +72,67 @@ def _apply_pagination(items, default_limit=None, max_limit=100):
     end = start + limit
     return items[start:end], total, page, limit
 
+
+# ---------- Auth: Registrierung & Login ----------
+
+@api_v1.route('/register', methods=['POST'])
+def register():
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
+
+    username = (data.get("username") or "").strip()
+    password = data.get("password")
+
+    if not username:
+        return jsonify({"error": "Username is required"}), 400
+    if not password:
+        return jsonify({"error": "Password is required"}), 400
+    if len(username) < 2:
+        return jsonify({"error": "Username must be at least 2 characters"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    for u in USERS:
+        if u["username"].lower() == username.lower():
+            return jsonify({"error": "Username already taken"}), 409
+
+    global _NEXT_USER_ID
+    user_id = _NEXT_USER_ID
+    _NEXT_USER_ID += 1
+    user = {
+        "id": user_id,
+        "username": username,
+        "password_hash": generate_password_hash(password),
+    }
+    USERS.append(user)
+    return jsonify({"id": user_id, "username": username}), 201
+
+
+@api_v1.route('/login', methods=['POST'])
+def login():
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({"error": "Invalid or missing JSON body"}), 400
+
+    username = (data.get("username") or "").strip()
+    password = data.get("password")
+
+    if not username or password is None:
+        return jsonify({"error": "Username and password are required"}), 400
+
+    for u in USERS:
+        if u["username"].lower() == username.lower() and check_password_hash(u["password_hash"], password):
+            access_token = create_access_token(identity=u["id"])
+            return jsonify({
+                "access_token": access_token,
+                "user": {"id": u["id"], "username": u["username"]},
+            }), 200
+
+    return jsonify({"error": "Invalid username or password"}), 401
+
+
+# ---------- Posts (öffentlich: List, Search) ----------
 
 @api_v1.route('/posts', methods=['GET'])
 def get_posts():
@@ -105,6 +192,7 @@ def search_posts():
 
 
 @api_v1.route('/posts', methods=['POST'])
+@jwt_required()
 def add_post():
     data = request.get_json(silent=True)
     if data is None:
@@ -126,6 +214,7 @@ def add_post():
 
 
 @api_v1.route('/posts/<int:post_id>', methods=['DELETE'])
+@jwt_required()
 def delete_post(post_id):
     for i, post in enumerate(POSTS):
         if post["id"] == post_id:
@@ -135,6 +224,7 @@ def delete_post(post_id):
 
 
 @api_v1.route('/posts/<int:post_id>', methods=['PUT'])
+@jwt_required()
 def update_post(post_id):
     data = request.get_json(silent=True) or {}
 
@@ -157,6 +247,14 @@ app.register_blueprint(api_v1)
 @app.errorhandler(429)
 def ratelimit_handler(e):
     return jsonify({"error": "Too many requests. Please try again later."}), 429
+
+
+# Abwärtskompatibilität: /api/register, /api/login → /api/v1/...
+@app.route("/api/register", methods=["POST"])
+@app.route("/api/login", methods=["POST"])
+def redirect_api_auth_to_v1():
+    path = request.path.replace("/api/", "/api/v1/", 1)
+    return redirect(path, code=307)
 
 
 # Abwärtskompatibilität: /api/posts* → /api/v1/posts* (307 = Method + Body bleiben)
