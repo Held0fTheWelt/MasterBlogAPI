@@ -10,10 +10,21 @@ from flask_jwt_extended import (
 )
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_swagger_ui import get_swaggerui_blueprint
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 CORS(app)
+
+# Swagger UI – API-Dokumentation unter http://localhost:5002/api/docs
+SWAGGER_URL = "/api/docs"
+API_URL = "/static/masterblog.json"
+swagger_ui_blueprint = get_swaggerui_blueprint(
+    SWAGGER_URL,
+    API_URL,
+    config={"app_name": "Masterblog API"},
+)
+app.register_blueprint(swagger_ui_blueprint, url_prefix=SWAGGER_URL)
 
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY", "change-me-in-production")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", 3600))  # 1h

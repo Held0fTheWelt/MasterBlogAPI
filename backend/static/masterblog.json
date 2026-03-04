@@ -1,0 +1,315 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "Masterblog API",
+    "version": "1.0.0",
+    "description": "REST API for blog posts with authentication, categories, tags and comments."
+  },
+  "host": "localhost:5002",
+  "basePath": "/api/v1",
+  "schemes": ["http"],
+  "securityDefinitions": {
+    "Bearer": {
+      "type": "apiKey",
+      "name": "Authorization",
+      "in": "header",
+      "description": "JWT token from /login. Format: Bearer &lt;access_token&gt;"
+    }
+  },
+  "security": [],
+  "tags": [
+    { "name": "Auth", "description": "Registration and login" },
+    { "name": "Posts", "description": "Blog posts (CRUD, search, sort, pagination)" },
+    { "name": "Categories", "description": "Categories" },
+    { "name": "Tags", "description": "Tags" },
+    { "name": "Comments", "description": "Comments on posts" }
+  ],
+  "paths": {
+    "/register": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Register a new user",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["username", "password"],
+              "properties": {
+                "username": { "type": "string", "minLength": 2 },
+                "password": { "type": "string", "minLength": 6 }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "201": { "description": "User created" },
+          "400": { "description": "Invalid or missing data" },
+          "409": { "description": "Username already taken" }
+        }
+      }
+    },
+    "/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Login and get access token",
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["username", "password"],
+              "properties": {
+                "username": { "type": "string" },
+                "password": { "type": "string" }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Success – returns access_token and user" },
+          "400": { "description": "Missing or invalid body" },
+          "401": { "description": "Invalid username or password" }
+        }
+      }
+    },
+    "/posts": {
+      "get": {
+        "tags": ["Posts"],
+        "summary": "Returns all posts (optional sort, pagination, filter by category/tag)",
+        "produces": ["application/json"],
+        "parameters": [
+          { "in": "query", "name": "sort", "type": "string", "enum": ["title", "content"] },
+          { "in": "query", "name": "direction", "type": "string", "enum": ["asc", "desc"] },
+          { "in": "query", "name": "page", "type": "integer" },
+          { "in": "query", "name": "limit", "type": "integer" },
+          { "in": "query", "name": "category_id", "type": "integer" },
+          { "in": "query", "name": "tag_id", "type": "integer" }
+        ],
+        "responses": {
+          "200": { "description": "List of posts (with categories and tags)" },
+          "400": { "description": "Invalid parameters (e.g. sort, direction)" }
+        }
+      },
+      "post": {
+        "tags": ["Posts"],
+        "summary": "Create a new post (Auth)",
+        "security": [{ "Bearer": [] }],
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["title", "content"],
+              "properties": {
+                "title": { "type": "string" },
+                "content": { "type": "string" },
+                "category_ids": { "type": "array", "items": { "type": "integer" } },
+                "tag_ids": { "type": "array", "items": { "type": "integer" } }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "201": { "description": "Post created" },
+          "400": { "description": "Missing or invalid fields" },
+          "401": { "description": "Authorization required" }
+        }
+      }
+    },
+    "/posts/search": {
+      "get": {
+        "tags": ["Posts"],
+        "summary": "Search posts by title or content",
+        "produces": ["application/json"],
+        "parameters": [
+          { "in": "query", "name": "title", "type": "string" },
+          { "in": "query", "name": "content", "type": "string" },
+          { "in": "query", "name": "category_id", "type": "integer" },
+          { "in": "query", "name": "tag_id", "type": "integer" },
+          { "in": "query", "name": "page", "type": "integer" },
+          { "in": "query", "name": "limit", "type": "integer" }
+        ],
+        "responses": {
+          "200": { "description": "List of matching posts" }
+        }
+      }
+    },
+    "/posts/{post_id}": {
+      "get": {
+        "tags": ["Posts"],
+        "summary": "Get a single post including comments",
+        "produces": ["application/json"],
+        "parameters": [
+          { "in": "path", "name": "post_id", "required": true, "type": "integer" }
+        ],
+        "responses": {
+          "200": { "description": "Post with categories, tags and comments" },
+          "404": { "description": "Post not found" }
+        }
+      },
+      "put": {
+        "tags": ["Posts"],
+        "summary": "Update a post (Auth)",
+        "security": [{ "Bearer": [] }],
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          { "in": "path", "name": "post_id", "required": true, "type": "integer" },
+          {
+            "in": "body",
+            "name": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "title": { "type": "string" },
+                "content": { "type": "string" },
+                "category_ids": { "type": "array", "items": { "type": "integer" } },
+                "tag_ids": { "type": "array", "items": { "type": "integer" } }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Post updated" },
+          "400": { "description": "Invalid category_ids or tag_ids" },
+          "401": { "description": "Authorization required" },
+          "404": { "description": "Post not found" }
+        }
+      },
+      "delete": {
+        "tags": ["Posts"],
+        "summary": "Delete a post (Auth)",
+        "security": [{ "Bearer": [] }],
+        "parameters": [
+          { "in": "path", "name": "post_id", "required": true, "type": "integer" }
+        ],
+        "responses": {
+          "200": { "description": "Post deleted" },
+          "401": { "description": "Authorization required" },
+          "404": { "description": "Post not found" }
+        }
+      }
+    },
+    "/posts/{post_id}/comments": {
+      "get": {
+        "tags": ["Comments"],
+        "summary": "Get comments for a post",
+        "produces": ["application/json"],
+        "parameters": [
+          { "in": "path", "name": "post_id", "required": true, "type": "integer" },
+          { "in": "query", "name": "page", "type": "integer" },
+          { "in": "query", "name": "limit", "type": "integer" }
+        ],
+        "responses": {
+          "200": { "description": "List of comments" },
+          "404": { "description": "Post not found" }
+        }
+      },
+      "post": {
+        "tags": ["Comments"],
+        "summary": "Add a comment (Auth)",
+        "security": [{ "Bearer": [] }],
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          { "in": "path", "name": "post_id", "required": true, "type": "integer" },
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["content"],
+              "properties": { "content": { "type": "string" } }
+            }
+          }
+        ],
+        "responses": {
+          "201": { "description": "Comment created" },
+          "400": { "description": "content missing" },
+          "401": { "description": "Authorization required" },
+          "404": { "description": "Post not found" }
+        }
+      }
+    },
+    "/categories": {
+      "get": {
+        "tags": ["Categories"],
+        "summary": "List all categories",
+        "produces": ["application/json"],
+        "responses": { "200": { "description": "List of categories" } }
+      },
+      "post": {
+        "tags": ["Categories"],
+        "summary": "Create a category (Auth)",
+        "security": [{ "Bearer": [] }],
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["name"],
+              "properties": { "name": { "type": "string" } }
+            }
+          }
+        ],
+        "responses": {
+          "201": { "description": "Category created" },
+          "400": { "description": "name missing" },
+          "401": { "description": "Authorization required" },
+          "409": { "description": "Name already exists" }
+        }
+      }
+    },
+    "/tags": {
+      "get": {
+        "tags": ["Tags"],
+        "summary": "List all tags",
+        "produces": ["application/json"],
+        "responses": { "200": { "description": "List of tags" } }
+      },
+      "post": {
+        "tags": ["Tags"],
+        "summary": "Create a tag (Auth)",
+        "security": [{ "Bearer": [] }],
+        "consumes": ["application/json"],
+        "produces": ["application/json"],
+        "parameters": [
+          {
+            "in": "body",
+            "name": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["name"],
+              "properties": { "name": { "type": "string" } }
+            }
+          }
+        ],
+        "responses": {
+          "201": { "description": "Tag created" },
+          "400": { "description": "name missing" },
+          "401": { "description": "Authorization required" },
+          "409": { "description": "Name already exists" }
+        }
+      }
+    }
+  }
+}
