@@ -1,4 +1,6 @@
+import json
 import os
+import sys
 from datetime import date, datetime
 from flask import Blueprint, Flask, jsonify, redirect, request
 from flask_cors import CORS
@@ -10,13 +12,22 @@ from flask_jwt_extended import (
 )
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_sqlalchemy import SQLAlchemy
 from flask_swagger_ui import get_swaggerui_blueprint
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 CORS(app)
 
-# Swagger UI – API-Dokumentation unter http://localhost:5002/api/docs
+# SQLAlchemy: SQLite database (default: data/masterblog.db in project root)
+_basedir = os.path.dirname(os.path.abspath(__file__))
+_default_db = os.path.join(_basedir, "..", "data", "masterblog.db")
+_default_uri = "sqlite:///" + os.path.abspath(_default_db).replace("\\", "/")
+app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URI", _default_uri)
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+db = SQLAlchemy(app)
+
+# Swagger UI – API docs at http://localhost:5002/api/docs
 SWAGGER_URL = "/api/docs"
 API_URL = "/static/masterblog.json"
 swagger_ui_blueprint = get_swaggerui_blueprint(
@@ -40,7 +51,7 @@ def unauthorized_callback(_):
 def invalid_token_callback(_):
     return jsonify({"error": "Invalid or expired token."}), 401
 
-# Rate limiting: pro IP, Standard 100 Requests/Minute (konfigurierbar)
+# Rate limiting: per IP, default 100 requests/minute (configurable)
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
@@ -48,8 +59,33 @@ limiter = Limiter(
     storage_uri="memory://",
 )
 
-# API Versioning: v1 Blueprint (später z. B. /api/v2 für Breaking Changes)
+# API versioning: v1 blueprint (e.g. /api/v2 for breaking changes later)
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
+
+
+class Post(db.Model):
+    """Blog post, persisted in the database."""
+    __tablename__ = "posts"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    title = db.Column(db.String(500), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    author = db.Column(db.String(200), default="")
+    date = db.Column(db.String(10), nullable=False)  # YYYY-MM-DD
+    category_ids = db.Column(db.Text, default="[]")  # JSON list
+    tag_ids = db.Column(db.Text, default="[]")       # JSON list
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "content": self.content,
+            "author": self.author or "",
+            "date": self.date or "",
+            "category_ids": json.loads(self.category_ids) if self.category_ids else [],
+            "tag_ids": json.loads(self.tag_ids) if self.tag_ids else [],
+        }
+
 
 def _parse_date(s):
     """Parse YYYY-MM-DD string to date; return None if invalid."""
@@ -67,26 +103,10 @@ def _date_sort_key(post):
     return d if d is not None else date.min
 
 
-POSTS = [
-    {
-        "id": 1,
-        "title": "First post",
-        "content": "This is the first post.",
-        "author": "Admin",
-        "date": "2023-06-07",
-        "category_ids": [1],
-        "tag_ids": [1, 2],
-    },
-    {
-        "id": 2,
-        "title": "Second post",
-        "content": "This is the second post.",
-        "author": "Admin",
-        "date": "2023-06-08",
-        "category_ids": [2],
-        "tag_ids": [2],
-    },
-]
+def _get_all_posts_as_dicts():
+    """Return all posts from the DB as a list of dicts (for _enrich_post)."""
+    return [p.to_dict() for p in Post.query.all()]
+
 
 CATEGORIES = [
     {"id": 1, "name": "Tech"},
@@ -105,7 +125,7 @@ COMMENTS = [
 ]
 _NEXT_COMMENT_ID = 2
 
-# User-Speicher (In-Memory). In Produktion: Datenbank + sichere Secrets.
+# User store (in-memory). In production: use a database and secure secrets.
 USERS = []
 _NEXT_USER_ID = 1
 
@@ -118,7 +138,7 @@ def _user_by_id(uid):
 
 
 def _enrich_post(post):
-    """Fügt aufgelöste Kategorien und Tags zum Post hinzu (für Response)."""
+    """Add resolved categories and tags to the post (for response)."""
     out = dict(post)
     out["categories"] = [c for c in CATEGORIES if c["id"] in post.get("category_ids", [])]
     out["tags"] = [t for t in TAGS if t["id"] in post.get("tag_ids", [])]
@@ -133,7 +153,7 @@ def _enrich_comment(comment):
 
 
 def _apply_pagination(items, default_limit=None, max_limit=100):
-    """Wendet optionale Pagination an. Gibt (slice_list, total, page, limit) zurück."""
+    """Apply optional pagination. Returns (sliced_list, total, page, limit)."""
     page_arg = request.args.get('page', type=int)
     limit_arg = request.args.get('limit', type=int)
 
@@ -156,7 +176,7 @@ def _apply_pagination(items, default_limit=None, max_limit=100):
     return items[start:end], total, page, limit
 
 
-# ---------- Auth: Registrierung & Login ----------
+# ---------- Auth: registration & login ----------
 
 @api_v1.route('/register', methods=['POST'])
 def register():
@@ -215,7 +235,7 @@ def login():
     return jsonify({"error": "Invalid username or password"}), 401
 
 
-# ---------- Posts (öffentlich: List, Search) ----------
+# ---------- Posts (public: list, search) ----------
 
 @api_v1.route('/posts', methods=['GET'])
 def get_posts():
@@ -229,15 +249,14 @@ def get_posts():
     if direction and not sort:
         return jsonify({"error": "Parameter 'sort' is required when 'direction' is provided."}), 400
 
+    posts = _get_all_posts_as_dicts()
     if sort:
         if sort == 'date':
-            posts = sorted(POSTS, key=_date_sort_key, reverse=(direction == 'desc'))
+            posts = sorted(posts, key=_date_sort_key, reverse=(direction == 'desc'))
         else:
-            posts = sorted(POSTS, key=lambda p: (p.get(sort) or "").lower(), reverse=(direction == 'desc'))
-    else:
-        posts = list(POSTS)
+            posts = sorted(posts, key=lambda p: (p.get(sort) or "").lower(), reverse=(direction == 'desc'))
 
-    # Optional: nach Kategorie oder Tag filtern
+    # Optional: filter by category or tag
     category_id = request.args.get('category_id', type=int)
     tag_id = request.args.get('tag_id', type=int)
     if category_id is not None:
@@ -247,7 +266,7 @@ def get_posts():
 
     sliced, total, page, limit = _apply_pagination(posts)
     if sliced is None:
-        return jsonify({"error": limit}), 400  # limit ist hier die Fehlermeldung
+        return jsonify({"error": limit}), 400  # limit holds the error message here
 
     if page is not None:
         resp = jsonify([_enrich_post(p) for p in sliced])
@@ -265,11 +284,12 @@ def search_posts():
     author_q = request.args.get('author', '').lower()
     date_q = request.args.get('date', '').strip()
 
+    posts = _get_all_posts_as_dicts()
     if not title_q and not content_q and not author_q and not date_q:
-        results = list(POSTS)
+        results = posts
     else:
         results = []
-        for post in POSTS:
+        for post in posts:
             title_match = title_q in (post.get('title') or '').lower() if title_q else False
             content_match = content_q in (post.get('content') or '').lower() if content_q else False
             author_match = author_q in (post.get('author') or '').lower() if author_q else False
@@ -299,13 +319,13 @@ def search_posts():
 
 @api_v1.route('/posts/<int:post_id>', methods=['GET'])
 def get_post(post_id):
-    for post in POSTS:
-        if post["id"] == post_id:
-            comments = [_enrich_comment(c) for c in COMMENTS if c["post_id"] == post_id]
-            out = _enrich_post(post)
-            out["comments"] = comments
-            return jsonify(out), 200
-    return jsonify({"error": "Post not found"}), 404
+    post = Post.query.get(post_id)
+    if post is None:
+        return jsonify({"error": "Post not found"}), 404
+    comments = [_enrich_comment(c) for c in COMMENTS if c["post_id"] == post_id]
+    out = _enrich_post(post.to_dict())
+    out["comments"] = comments
+    return jsonify(out), 200
 
 
 @api_v1.route('/posts', methods=['POST'])
@@ -347,75 +367,74 @@ def add_post():
     if not tag_ok:
         return jsonify({"error": "One or more tag_ids are invalid"}), 400
 
-    new_id = max((p["id"] for p in POSTS), default=0) + 1
-    new_post = {
-        "id": new_id,
-        "title": data["title"],
-        "content": data["content"],
-        "author": author,
-        "date": date_str,
-        "category_ids": category_ids,
-        "tag_ids": tag_ids,
-    }
-    POSTS.append(new_post)
-    return jsonify(_enrich_post(new_post)), 201
+    new_post = Post(
+        title=data["title"],
+        content=data["content"],
+        author=author,
+        date=date_str,
+        category_ids=json.dumps(category_ids),
+        tag_ids=json.dumps(tag_ids),
+    )
+    db.session.add(new_post)
+    db.session.commit()
+    return jsonify(_enrich_post(new_post.to_dict())), 201
 
 
 @api_v1.route('/posts/<int:post_id>', methods=['DELETE'])
 @jwt_required()
 def delete_post(post_id):
-    for i, post in enumerate(POSTS):
-        if post["id"] == post_id:
-            POSTS.pop(i)
-            # Kommentare zu diesem Post entfernen
-            global COMMENTS
-            COMMENTS = [c for c in COMMENTS if c["post_id"] != post_id]
-            return jsonify({"message": f"Post with id {post_id} has been deleted successfully."}), 200
-    return jsonify({"error": "Post not found"}), 404
+    post = Post.query.get(post_id)
+    if post is None:
+        return jsonify({"error": "Post not found"}), 404
+    db.session.delete(post)
+    db.session.commit()
+    global COMMENTS
+    COMMENTS = [c for c in COMMENTS if c["post_id"] != post_id]
+    return jsonify({"message": f"Post with id {post_id} has been deleted successfully."}), 200
 
 
 @api_v1.route('/posts/<int:post_id>', methods=['PUT'])
 @jwt_required()
 def update_post(post_id):
     data = request.get_json(silent=True) or {}
+    post = Post.query.get(post_id)
+    if post is None:
+        return jsonify({"error": "Post not found"}), 404
 
-    for post in POSTS:
-        if post["id"] == post_id:
-            if "title" in data:
-                post["title"] = data["title"]
-            if "content" in data:
-                post["content"] = data["content"]
-            if "author" in data:
-                post["author"] = (data["author"] or "").strip() if data["author"] is not None else ""
-            if "date" in data:
-                date_str = (data.get("date") or "").strip()
-                if date_str:
-                    parsed = _parse_date(date_str)
-                    if parsed is None:
-                        return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
-                    post["date"] = parsed.strftime("%Y-%m-%d")
-                else:
-                    post["date"] = date.today().strftime("%Y-%m-%d")
-            if "category_ids" in data:
-                ids = data["category_ids"]
-                if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):
-                    return jsonify({"error": "category_ids must be a list of integers"}), 400
-                if not all(any(c["id"] == x for c in CATEGORIES) for x in ids):
-                    return jsonify({"error": "One or more category_ids are invalid"}), 400
-                post["category_ids"] = ids
-            if "tag_ids" in data:
-                ids = data["tag_ids"]
-                if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):
-                    return jsonify({"error": "tag_ids must be a list of integers"}), 400
-                if not all(any(t["id"] == x for t in TAGS) for x in ids):
-                    return jsonify({"error": "One or more tag_ids are invalid"}), 400
-                post["tag_ids"] = ids
-            return jsonify(_enrich_post(post)), 200
-
-    return jsonify({"error": "Post not found"}), 404
+    if "title" in data:
+        post.title = data["title"]
+    if "content" in data:
+        post.content = data["content"]
+    if "author" in data:
+        post.author = (data["author"] or "").strip() if data["author"] is not None else ""
+    if "date" in data:
+        date_str = (data.get("date") or "").strip()
+        if date_str:
+            parsed = _parse_date(date_str)
+            if parsed is None:
+                return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+            post.date = parsed.strftime("%Y-%m-%d")
+        else:
+            post.date = date.today().strftime("%Y-%m-%d")
+    if "category_ids" in data:
+        ids = data["category_ids"]
+        if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):
+            return jsonify({"error": "category_ids must be a list of integers"}), 400
+        if not all(any(c["id"] == x for c in CATEGORIES) for x in ids):
+            return jsonify({"error": "One or more category_ids are invalid"}), 400
+        post.category_ids = json.dumps(ids)
+    if "tag_ids" in data:
+        ids = data["tag_ids"]
+        if not isinstance(ids, list) or not all(isinstance(x, int) for x in ids):
+            return jsonify({"error": "tag_ids must be a list of integers"}), 400
+        if not all(any(t["id"] == x for t in TAGS) for x in ids):
+            return jsonify({"error": "One or more tag_ids are invalid"}), 400
+        post.tag_ids = json.dumps(ids)
+    db.session.commit()
+    return jsonify(_enrich_post(post.to_dict())), 200
 
 
-# ---------- Kategorien ----------
+# ---------- Categories ----------
 
 @api_v1.route('/categories', methods=['GET'])
 def list_categories():
@@ -465,11 +484,11 @@ def create_tag():
     return jsonify(tag), 201
 
 
-# ---------- Kommentare ----------
+# ---------- Comments ----------
 
 @api_v1.route('/posts/<int:post_id>/comments', methods=['GET'])
 def list_comments(post_id):
-    if not any(p["id"] == post_id for p in POSTS):
+    if Post.query.get(post_id) is None:
         return jsonify({"error": "Post not found"}), 404
     comments = [_enrich_comment(c) for c in COMMENTS if c["post_id"] == post_id]
     sliced, total, page, limit = _apply_pagination(comments)
@@ -487,7 +506,7 @@ def list_comments(post_id):
 @api_v1.route('/posts/<int:post_id>/comments', methods=['POST'])
 @jwt_required()
 def create_comment(post_id):
-    if not any(p["id"] == post_id for p in POSTS):
+    if Post.query.get(post_id) is None:
         return jsonify({"error": "Post not found"}), 404
     data = request.get_json(silent=True)
     if data is None:
@@ -512,13 +531,13 @@ def create_comment(post_id):
 app.register_blueprint(api_v1)
 
 
-# Rate-Limit-Überschreitung: einheitliche JSON-Antwort
+# Rate limit exceeded: consistent JSON response
 @app.errorhandler(429)
 def ratelimit_handler(e):
     return jsonify({"error": "Too many requests. Please try again later."}), 429
 
 
-# Abwärtskompatibilität: /api/register, /api/login → /api/v1/...
+# Backward compatibility: /api/register, /api/login → /api/v1/...
 @app.route("/api/register", methods=["POST"])
 @app.route("/api/login", methods=["POST"])
 def redirect_api_auth_to_v1():
@@ -526,7 +545,7 @@ def redirect_api_auth_to_v1():
     return redirect(path, code=307)
 
 
-# Abwärtskompatibilität: /api/posts* → /api/v1/posts* (307 = Method + Body bleiben)
+# Backward compatibility: /api/posts* → /api/v1/posts* (307 = preserve method and body)
 @app.route("/api/posts", methods=["GET", "POST"])
 @app.route("/api/posts/search", methods=["GET"])
 def redirect_api_posts_to_v1():
@@ -545,4 +564,16 @@ def redirect_api_post_to_v1(post_id):
 
 
 if __name__ == '__main__':
+    _backend_dir = os.path.dirname(os.path.abspath(__file__))
+    _project_root = os.path.dirname(_backend_dir)
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+    from backend import init_db as _init_db
+    uri = app.config["SQLALCHEMY_DATABASE_URI"]
+    if uri.startswith("sqlite:///"):
+        db_path = uri.replace("sqlite:///", "")
+        if db_path and not os.path.exists(db_path):
+            _init_db.ensure_db_exists()
+    with app.app_context():
+        db.create_all()
     app.run(host="0.0.0.0", port=5002, debug=True)
